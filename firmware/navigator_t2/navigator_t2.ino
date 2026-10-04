@@ -12,6 +12,7 @@ char name[NAME_LEN + 1];
 bool haveState = false, needDraw = false, stopped = false;
 uint8_t playState = 0;   // 0 not playing, 1 playing, 2 empty scene
 const char EMPTY_MSG[] = "<no clips>";
+const char ENDED_MSG[] = "<clip ended>";
 const uint32_t STOP_SETTLE_MS = 1000, STOP_MSG_MS = 1000, STOP_SCENE_MS = 1000, LIVE_TIMEOUT_MS = 5000;
 uint32_t lastRx = 0, cycleStart = 0;
 const uint32_t BLINK_LATENCY_MS = 0;   // raise if the blink leads the audible beat (audio output latency)
@@ -121,7 +122,7 @@ void draw() {
     drawCentered(50, "Push play.");
   } else {
     oled.setFont(u8g2_font_6x12_tr);
-    bool show = playState || stopped || blinkOn();
+    bool show = playState || stopped || progState == 3 || blinkOn();
     if (show) {
       char hdr[16];
       snprintf(hdr, sizeof(hdr), "Scene %u", sceneNum);
@@ -132,12 +133,13 @@ void draw() {
     }
     oled.drawHLine(0, 17, 128);
     oled.drawHLine(0, 46, 128);
-    bool msg = emptyMsg();
+    bool msg = emptyMsg() || (progState == 3 && !stopped && !finishedOn());
     int fill = progFill();
-    if (progState == 3 && !stopped && !finishedOn()) fill = 0;
+    if (progState == 3) fill = 0;
+    if (msg) fill = 128;
     if (fill) oled.drawBox(0, 18, fill, 28);
     oled.setDrawColor(2);
-    const char *mid = msg ? EMPTY_MSG : name;
+    const char *mid = msg ? (playState == 2 ? EMPTY_MSG : ENDED_MSG) : name;
     oled.setFont(msg ? u8g2_font_fub14_tr : u8g2_font_fub20_tr);
     nameW = oled.getStrWidth(mid);
     if (show) {
@@ -168,7 +170,7 @@ void loop() {
   for (int i = 0; i < 64; i++) usbMIDI.read();   // one call consumes one 3-byte event; a SysEx is 12
 
   static bool lastBlink = false;
-  if (haveState && playState == 0 && !stopped && blinkOn() != lastBlink) {
+  if (haveState && playState == 0 && !stopped && progState != 3 && blinkOn() != lastBlink) {
     lastBlink = !lastBlink;
     needDraw = true;
   }
