@@ -8,9 +8,18 @@ const uint8_t CC_SCENE_SCROLL = 20, NOTE_SCENE_FIRE = 60, NAME_LEN = 20;
 Encoder knob(PIN_A, PIN_B);
 U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);   // SSD1306 module? use U8G2_SSD1306_128X64_NONAME_F_HW_I2C
 
-char names[3][NAME_LEN + 1];   // prev, current, next
-bool haveState = false;
-uint8_t rx[64];
+char name[NAME_LEN + 1];
+bool haveState = false, playing = false, needDraw = false;
+const uint32_t BLINK_LATENCY_MS = 0;   // raise if the blink leads the audible beat (audio output latency)
+uint16_t sceneNum = 0, tempoX10 = 1200;
+uint32_t blinkAnchor = 0;
+uint16_t sceneTempoX10 = 1200;
+uint8_t sigNum = 4, sigDen = 4;
+const int NAME_FIT = 124, SCROLL_GAP = 40, SCROLL_PX_PER_S = 40;
+const uint32_t SCROLL_DELAY_MS = 1000;
+uint32_t scrollStart = 0;
+int nameW = 0;
+uint8_t rx[35];
 uint16_t rxLen = 0;
 
 void onSysEx(const uint8_t *d, uint16_t n, bool last) {
@@ -18,15 +27,44 @@ void onSysEx(const uint8_t *d, uint16_t n, bool last) {
   memcpy(rx + rxLen, d, n);
   rxLen += n;
   if (!last) return;
-  if (rxLen == 3 + 3 * NAME_LEN + 1 && rx[0] == 0xF0 && rx[1] == 0x7D && rx[2] == 0x02) {
-    for (int r = 0; r < 3; r++) {
-      memcpy(names[r], rx + 3 + r * NAME_LEN, NAME_LEN);
-      names[r][NAME_LEN] = 0;
-    }
+  if (rxLen == 14 + NAME_LEN + 1 && rx[0] == 0xF0 && rx[1] == 0x7D && rx[2] == 0x02) {
+    uint16_t num = rx[3] << 7 | rx[4];
+    playing = rx[5];
+    tempoX10 = rx[6] << 7 | rx[7];
+    uint16_t phase = rx[8] << 7 | rx[9];
+    sceneTempoX10 = rx[10] << 7 | rx[11];
+    sigNum = rx[12];
+    sigDen = rx[13];
+    if (phase != 0x3FFF) blinkAnchor = millis() - (uint32_t)((uint64_t)phase * beatMs() / 0x3FFF);
+    char incoming[NAME_LEN + 1];
+    memcpy(incoming, rx + 14, NAME_LEN);
+    incoming[NAME_LEN] = 0;
+    for (int i = NAME_LEN - 1; i >= 0 && incoming[i] == ' '; i--) incoming[i] = 0;
+    if (num != sceneNum || strcmp(incoming, name)) scrollStart = millis();
+    sceneNum = num;
+    strcpy(name, incoming);
     haveState = true;
-    draw();
+    needDraw = true;
   }
   rxLen = 0;
+}
+
+uint32_t beatMs() {
+  return tempoX10 ? 600000UL / tempoX10 : 500;
+}
+
+bool blinkOn() {
+  uint32_t period = beatMs();   // one on/off cycle per beat, "on" starts at the beat
+  return (millis() - blinkAnchor - BLINK_LATENCY_MS) % period < period / 2;
+}
+
+int scrollOffset() {
+  uint32_t t = millis() - scrollStart;
+  return t < SCROLL_DELAY_MS ? 0 : (uint64_t)(t - SCROLL_DELAY_MS) * SCROLL_PX_PER_S / 1000 % (nameW + SCROLL_GAP);
+}
+
+void drawCentered(int y, const char *s) {
+  oled.drawStr((128 - oled.getStrWidth(s)) / 2, y, s);
 }
 
 void draw() {
@@ -36,26 +74,59 @@ void draw() {
     oled.drawStr(20, 36, "waiting for Live");
   } else {
     oled.setFont(u8g2_font_6x12_tr);
-    oled.drawStr(4, 12, names[0]);
-    oled.drawStr(4, 60, names[2]);
-    oled.drawBox(0, 19, 128, 24);
-    oled.setDrawColor(0);
-    oled.setFont(u8g2_font_6x13B_tr);
-    oled.drawStr(4, 36, names[1]);
-    oled.setDrawColor(1);
+    bool show = playing || blinkOn();
+    if (show) {
+      char hdr[16];
+      snprintf(hdr, sizeof(hdr), "Scene %u", sceneNum);
+      drawCentered(11, hdr);
+      char row[24];
+      snprintf(row, sizeof(row), "%u.%u BPM %u/%u", sceneTempoX10 / 10, sceneTempoX10 % 10, sigNum, sigDen);
+      drawCentered(62, row);
+    }
+    oled.drawHLine(0, 17, 128);
+    oled.drawHLine(0, 46, 128);
+    oled.setFont(u8g2_font_fub20_tr);
+    nameW = oled.getStrWidth(name);
+    if (show) {
+      if (nameW <= NAME_FIT) {
+        drawCentered(40, name);
+      } else {
+        int x = 2 - scrollOffset();
+        oled.drawStr(x, 40, name);
+        oled.drawStr(x + nameW + SCROLL_GAP, 40, name);
+      }
+    }
   }
   oled.sendBuffer();
 }
 
 void setup() {
   pinMode(PIN_SW, INPUT_PULLUP);
+  oled.setBusClock(400000);
   oled.begin();
   usbMIDI.setHandleSystemExclusive(onSysEx);
   draw();
 }
 
 void loop() {
-  usbMIDI.read();
+  for (int i = 0; i < 64; i++) usbMIDI.read();   // one call consumes one 3-byte event; a SysEx is 12
+
+  static bool lastBlink = false;
+  if (haveState && !playing && blinkOn() != lastBlink) {
+    lastBlink = !lastBlink;
+    needDraw = true;
+  }
+
+  static int lastOffset = -1;
+  if (haveState && nameW > NAME_FIT && scrollOffset() != lastOffset) {
+    lastOffset = scrollOffset();
+    needDraw = true;
+  }
+
+  if (needDraw) {
+    needDraw = false;
+    draw();
+  }
 
   long steps = knob.read() / COUNTS_PER_DETENT;
   if (steps) {

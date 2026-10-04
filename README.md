@@ -1,10 +1,10 @@
 # Ableton Navigator T2
 
-A one-knob scene navigator for Ableton Live's Session view. Turn the knob to move through scenes, click to launch one. A small OLED shows the previous, current and next scene names.
+A one-knob scene navigator for Ableton Live's Session view. Turn the knob to move through scenes, click to launch one. A small OLED shows the selected scene's number, name, tempo and time signature.
 
 - Clockwise moves the selection down the scene list, counter-clockwise moves it up.
 - Click launches the selected scene.
-- The OLED shows three rows: scene above, current scene (highlighted), scene below. Unnamed scenes show their number.
+- The OLED shows three rows: "Scene N", the scene name (large; long names scroll), and the scene's tempo and time signature. All three blink on the beat while the selected scene isn't the one playing. Unnamed scenes show their number.
 
 ## Hardware
 
@@ -43,10 +43,10 @@ Don't unplug the Teensy while Live is open. If the display sticks on "waiting fo
 
 ```
 knob  -> CC 20 (relative), button -> Note 60   ->  Remote Script moves / fires the scene
-Live  -> SysEx F0 7D 02 <prev><cur><next> F7   ->  firmware redraws the OLED
+Live  -> SysEx F0 7D 02 <scene data><name> F7   ->  firmware redraws the OLED
 ```
 
-The Remote Script decides what the display shows and resends it every ~2 seconds, so there is no handshake. Names are ASCII only, 20 characters each. See `CLAUDE.md` for the protocol, the firmware's encoder handling, and known gaps.
+The Remote Script decides what the display shows and resends it every ~2 seconds, so there is no handshake. Names are ASCII only, up to 20 characters. See `CLAUDE.md` for the protocol, the firmware's encoder handling, and known gaps.
 
 ## Test
 

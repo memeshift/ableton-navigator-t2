@@ -29,20 +29,34 @@ class NavigatorT2(ControlSurface):
             self._button.add_value_listener(self._on_fire)
 
         self._dirty = True
+        self._playing = False
+        self._tempo = 0.0
+        self._running = False
         self._ticks = 0
         song = self.song()
-        song.view.add_selected_scene_listener(self._mark_dirty)
+        song.view.add_selected_scene_listener(self._on_scene_selected)
         song.add_scenes_listener(self._mark_dirty)
         self.log_message("NavigatorT2: loaded")
 
     def disconnect(self):
         song = self.song()
-        song.view.remove_selected_scene_listener(self._mark_dirty)
+        song.view.remove_selected_scene_listener(self._on_scene_selected)
         song.remove_scenes_listener(self._mark_dirty)
         super().disconnect()
 
     def _mark_dirty(self):
         self._dirty = True
+
+    def _on_scene_selected(self):
+        self._send_state(*self._snapshot())
+
+    def _snapshot(self):
+        song = self.song()
+        scenes = list(song.scenes)
+        index = scenes.index(song.view.selected_scene)
+        # the LOM has no scene-level "playing"; count the scene as playing if any track plays its slot
+        playing = any(t.playing_slot_index == index for t in song.tracks)
+        return song, scenes, index, playing
 
     def _on_scroll(self, value):
         delta = value - 128 if value >= 64 else value
@@ -65,11 +79,24 @@ class NavigatorT2(ControlSurface):
         if self._ticks >= RESEND_TICKS:
             self._ticks = 0
             self._dirty = True
+        song, scenes, index, playing = self._snapshot()
+        if playing != self._playing or song.tempo != self._tempo or song.is_playing != self._running:
+            self._playing = playing
+            self._tempo = song.tempo
+            self._running = song.is_playing
+            self._dirty = True
         if self._dirty:
-            self._dirty = False
-            song = self.song()
-            scenes = list(song.scenes)
-            # unnamed scenes read as empty in the LOM but show as numbers in Live
-            names = [s.name or str(i + 1) for i, s in enumerate(scenes)]
-            index = scenes.index(song.view.selected_scene)
-            self._send_midi(scene_message(names, index))
+            self._send_state(song, scenes, index, playing)
+
+    def _send_state(self, song, scenes, index, playing):
+        self._dirty = False
+        # unnamed scenes read as empty in the LOM but show as numbers in Live
+        scene = scenes[index]
+        name = scene.name or str(index + 1)
+        # a scene without its own tempo / time signature leaves the song's unchanged on launch
+        scene_bpm = scene.tempo if scene.tempo_enabled else song.tempo
+        sig = ((scene.time_signature_numerator, scene.time_signature_denominator)
+               if scene.time_signature_enabled else (song.signature_numerator, song.signature_denominator))
+        self._send_midi(scene_message(name, index, playing, self._tempo,
+                                       song.current_song_time if self._running else None,
+                                       scene_bpm, sig))
