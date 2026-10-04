@@ -102,7 +102,6 @@ void draw() {
 
 void setup() {
   pinMode(PIN_SW, INPUT_PULLUP);
-  oled.setBusClock(400000);
   oled.begin();
   usbMIDI.setHandleSystemExclusive(onSysEx);
   draw();
