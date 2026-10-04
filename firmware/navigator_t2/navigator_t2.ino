@@ -4,6 +4,13 @@
 const uint8_t PIN_A = 2, PIN_B = 3, PIN_SW = 4;
 const int COUNTS_PER_DETENT = 4;   // assumption: 24 detents / 24 pulses; verify against datasheet
 const uint8_t CC_SCENE_SCROLL = 20, NOTE_SCENE_FIRE = 60, NAME_LEN = 20;
+const uint8_t CC_TRACK_SCROLL = 21, NOTE_TRACK_CLICK = 61;
+const uint32_t LONG_PRESS_MS = 500;
+bool trackMode = false;   // resolved here, never sent; Live only sees which CC / note arrives
+char trackName[NAME_LEN + 1];
+uint16_t trackNum = 0;
+uint8_t trackKind = 0;   // 0 audio, 1 MIDI, 2 open group, 3 folded group
+const char *const TRACK_KIND_LABEL[] = {"Audio", "MIDI", "Group: open", "Group: folded"};
 
 Encoder knob(PIN_A, PIN_B);
 U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);   // SSD1306 module? use U8G2_SSD1306_128X64_NONAME_F_HW_I2C
@@ -26,7 +33,7 @@ uint32_t scrollStart = 0;
 uint8_t progState = 0;   // 0 none, 1 looping clip, 2 one-shot, 3 one-shot finished
 uint32_t progStart = 0, progTotalMs = 0, finishedStart = 0;
 int nameW = 0;
-uint8_t rx[40];
+uint8_t rx[64];
 uint16_t rxLen = 0;
 
 void onSysEx(const uint8_t *d, uint16_t n, bool last) {
@@ -34,7 +41,8 @@ void onSysEx(const uint8_t *d, uint16_t n, bool last) {
   memcpy(rx + rxLen, d, n);
   rxLen += n;
   if (!last) return;
-  if (rxLen == 14 + NAME_LEN + 5 + 1 && rx[0] == 0xF0 && rx[1] == 0x7D && rx[2] == 0x02) {
+  const int TRK = 14 + NAME_LEN + 5;
+  if (rxLen == TRK + 3 + NAME_LEN + 1 && rx[0] == 0xF0 && rx[1] == 0x7D && rx[2] == 0x02) {
     uint16_t num = rx[3] << 7 | rx[4];
     playState = rx[5];
     tempoX10 = rx[6] << 7 | rx[7];
@@ -51,7 +59,11 @@ void onSysEx(const uint8_t *d, uint16_t n, bool last) {
     memcpy(incoming, rx + 14, NAME_LEN);
     incoming[NAME_LEN] = 0;
     for (int i = NAME_LEN - 1; i >= 0 && incoming[i] == ' '; i--) incoming[i] = 0;
-    if (num != sceneNum || strcmp(incoming, name)) {
+    char trackIncoming[NAME_LEN + 1];
+    memcpy(trackIncoming, rx + TRK + 3, NAME_LEN);
+    trackIncoming[NAME_LEN] = 0;
+    for (int i = NAME_LEN - 1; i >= 0 && trackIncoming[i] == ' '; i--) trackIncoming[i] = 0;
+    if (num != sceneNum || strcmp(incoming, name) || (trackMode && strcmp(trackIncoming, trackName))) {
       scrollStart = millis();
       cycleStart = millis() - (STOP_SCENE_MS - STOP_SETTLE_MS);
     }
@@ -63,6 +75,9 @@ void onSysEx(const uint8_t *d, uint16_t n, bool last) {
     progStart = millis() - (progTotalMs - leftMs);
     sceneNum = num;
     strcpy(name, incoming);
+    trackNum = rx[TRK] << 7 | rx[TRK + 1];
+    trackKind = rx[TRK + 2] & 3;
+    strcpy(trackName, trackIncoming);
     haveState = true;
     needDraw = true;
   }
@@ -111,6 +126,16 @@ void drawCentered(int y, const char *s) {
   oled.drawStr((128 - oled.getStrWidth(s)) / 2, y, s);
 }
 
+void drawName(const char *s) {
+  if (nameW <= NAME_FIT) {
+    drawCentered(40, s);
+  } else {
+    int x = 2 - scrollOffset();
+    oled.drawStr(x, 40, s);
+    oled.drawStr(x + nameW + SCROLL_GAP, 40, s);
+  }
+}
+
 void draw() {
   oled.clearBuffer();
   if (!haveState) {
@@ -120,6 +145,18 @@ void draw() {
     oled.setFont(u8g2_font_helvB12_tr);
     drawCentered(28, "Live stopped.");
     drawCentered(50, "Push play.");
+  } else if (trackMode) {
+    oled.setFont(u8g2_font_6x12_tr);
+    char hdr[16];
+    if (trackNum) snprintf(hdr, sizeof(hdr), "Track %u", trackNum);
+    else snprintf(hdr, sizeof(hdr), "Track -");
+    drawCentered(11, hdr);
+    drawCentered(62, TRACK_KIND_LABEL[trackKind]);
+    oled.drawHLine(0, 17, 128);
+    oled.drawHLine(0, 46, 128);
+    oled.setFont(u8g2_font_fub20_tr);
+    nameW = oled.getStrWidth(trackName);
+    drawName(trackName);
   } else {
     oled.setFont(u8g2_font_6x12_tr);
     bool show = playState || stopped || progState == 3 || blinkOn();
@@ -143,15 +180,8 @@ void draw() {
     oled.setFont(msg ? u8g2_font_fub14_tr : u8g2_font_fub20_tr);
     nameW = oled.getStrWidth(mid);
     if (show) {
-      if (msg) {
-        drawCentered(38, mid);
-      } else if (nameW <= NAME_FIT) {
-        drawCentered(40, mid);
-      } else {
-        int x = 2 - scrollOffset();
-        oled.drawStr(x, 40, mid);
-        oled.drawStr(x + nameW + SCROLL_GAP, 40, mid);
-      }
+      if (msg) drawCentered(38, mid);
+      else drawName(mid);
     }
   }
   oled.setDrawColor(1);
@@ -170,7 +200,7 @@ void loop() {
   for (int i = 0; i < 64; i++) usbMIDI.read();   // one call consumes one 3-byte event; a SysEx is 12
 
   static bool lastBlink = false;
-  if (haveState && playState == 0 && !stopped && progState != 3 && blinkOn() != lastBlink) {
+  if (haveState && !trackMode && playState == 0 && !stopped && progState != 3 && blinkOn() != lastBlink) {
     lastBlink = !lastBlink;
     needDraw = true;
   }
@@ -183,6 +213,7 @@ void loop() {
 
   if (haveState && millis() - lastRx > LIVE_TIMEOUT_MS) {
     haveState = false;
+    trackMode = false;
     needDraw = true;
   }
 
@@ -193,7 +224,7 @@ void loop() {
   }
 
   static int lastFill = -1;
-  int fill = haveState && !showMessage() ? progFill() + (progState == 3 && !stopped && finishedOn()) : 0;
+  int fill = haveState && !trackMode && !showMessage() ? progFill() + (progState == 3 && !stopped && finishedOn()) : 0;
   if (fill != lastFill) {
     lastFill = fill;
     needDraw = true;
@@ -207,7 +238,7 @@ void loop() {
   long steps = knob.read() / COUNTS_PER_DETENT;
   if (steps) {
     knob.write(knob.read() - steps * COUNTS_PER_DETENT);
-    usbMIDI.sendControlChange(CC_SCENE_SCROLL, steps > 0 ? steps : 128 + steps, 1);
+    usbMIDI.sendControlChange(trackMode ? CC_TRACK_SCROLL : CC_SCENE_SCROLL, steps > 0 ? steps : 128 + steps, 1);
     usbMIDI.send_now();
   }
 
@@ -224,14 +255,29 @@ void loop() {
     if (off) knob.write(count - off);
   }
 
-  static bool down = false;
+  // Click fires on release so a hold can switch mode without also launching;
+  // the hold acts while still down and longHandled swallows the release.
+  static bool down = false, longHandled = false;
   static uint32_t changed = 0;
   bool pressed = digitalRead(PIN_SW) == LOW;
   if (pressed != down && millis() - changed > 20) {
     down = pressed;
     changed = millis();
-    if (down) usbMIDI.sendNoteOn(NOTE_SCENE_FIRE, 127, 1);
-    else usbMIDI.sendNoteOff(NOTE_SCENE_FIRE, 0, 1);
-    usbMIDI.send_now();
+    if (down) {
+      longHandled = false;
+    } else if (!longHandled) {
+      uint8_t note = trackMode ? NOTE_TRACK_CLICK : NOTE_SCENE_FIRE;
+      usbMIDI.sendNoteOn(note, 127, 1);
+      usbMIDI.sendNoteOff(note, 0, 1);
+      usbMIDI.send_now();
+    }
+  }
+  if (down && !longHandled && millis() - changed > LONG_PRESS_MS) {
+    longHandled = true;
+    if (haveState) {
+      trackMode = !trackMode;
+      scrollStart = millis();
+      needDraw = true;
+    }
   }
 }

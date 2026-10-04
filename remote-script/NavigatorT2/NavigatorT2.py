@@ -11,6 +11,8 @@ from .protocol import clip_progress, scene_message
 CHANNEL = 0  # MIDI channel 1
 CC_SCENE_SCROLL = 20
 NOTE_SCENE_FIRE = 60
+CC_TRACK_SCROLL = 21
+NOTE_TRACK_CLICK = 61
 
 # update_display() runs on Live's ~100ms timer; this resends about every two
 # seconds so a device plugged in after Live, or a renamed scene, catches up.
@@ -38,8 +40,16 @@ class NavigatorT2(ControlSurface):
                 True, MIDI_NOTE_TYPE, CHANNEL, NOTE_SCENE_FIRE)
             self._encoder.add_value_listener(self._on_scroll)
             self._button.add_value_listener(self._on_fire)
+            self._track_encoder = EncoderElement(
+                MIDI_CC_TYPE, CHANNEL, CC_TRACK_SCROLL,
+                Live.MidiMap.MapMode.relative_two_compliment)
+            self._track_button = ButtonElement(
+                True, MIDI_NOTE_TYPE, CHANNEL, NOTE_TRACK_CLICK)
+            self._track_encoder.add_value_listener(self._on_track_scroll)
+            self._track_button.add_value_listener(self._on_track_click)
 
         self._dirty = True
+        self._track = None
         self._playing = False
         self._tempo = 0.0
         self._prog = (0, 0.0, 0.0)
@@ -49,13 +59,17 @@ class NavigatorT2(ControlSurface):
         self._ticks = 0
         song = self.song()
         song.view.add_selected_scene_listener(self._on_scene_selected)
+        song.view.add_selected_track_listener(self._on_scene_selected)
         song.add_scenes_listener(self._mark_dirty)
+        song.add_tracks_listener(self._mark_dirty)
         self.log_message("NavigatorT2: loaded")
 
     def disconnect(self):
         song = self.song()
         song.view.remove_selected_scene_listener(self._on_scene_selected)
+        song.view.remove_selected_track_listener(self._on_scene_selected)
         song.remove_scenes_listener(self._mark_dirty)
+        song.remove_tracks_listener(self._mark_dirty)
         super().disconnect()
 
     def _mark_dirty(self):
@@ -120,6 +134,31 @@ class NavigatorT2(ControlSurface):
         if value:
             self.song().view.selected_scene.fire()
 
+    def _track_info(self, song):
+        """(name, 0-based index or -1, kind) of the selected track; kind 0 audio, 1 MIDI, 2 open group, 3 folded group."""
+        track = song.view.selected_track
+        tracks = list(song.tracks)
+        if track.is_foldable:
+            kind = 3 if track.fold_state else 2
+        else:
+            kind = 1 if track.has_midi_input else 0
+        return track.name, tracks.index(track) if track in tracks else -1, kind
+
+    def _on_track_scroll(self, value):
+        delta = value - 128 if value >= 64 else value
+        view = self.song().view
+        visible = [t for t in self.song().tracks if t.is_visible]
+        track = view.selected_track
+        while track not in visible and track.is_grouped:
+            track = track.group_track
+        index = visible.index(track) if track in visible else 0
+        view.selected_track = visible[max(0, min(len(visible) - 1, index + delta))]
+
+    def _on_track_click(self, value):
+        track = self.song().view.selected_track
+        if value and track.is_foldable:
+            track.fold_state = 0 if track.fold_state else 1
+
     def refresh_state(self):
         super().refresh_state()
         self._dirty = True
@@ -142,6 +181,10 @@ class NavigatorT2(ControlSurface):
             drift = abs(prog[1] - expected)
             if min(drift, prog[2] - drift) > PROGRESS_DRIFT_S:
                 self._dirty = True
+        track = self._track_info(song)
+        if track != self._track:
+            self._track = track
+            self._dirty = True
         if playing != self._playing or song.tempo != self._tempo or song.is_playing != self._running:
             self._playing = playing
             self._tempo = song.tempo
@@ -161,4 +204,4 @@ class NavigatorT2(ControlSurface):
                if scene.time_signature_enabled else (song.signature_numerator, song.signature_denominator))
         self._send_midi(scene_message(name, index, playing, self._tempo,
                                        song.current_song_time if self._running else None,
-                                       scene_bpm, sig, self._progress(song)))
+                                       scene_bpm, sig, self._progress(song), self._track_info(song)))
