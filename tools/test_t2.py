@@ -12,4 +12,5 @@ assert msg[3:8] == (0, 1, 0, 9, 48) and m.scene_message("x", 150, True, 128.5)[3
 assert msg[8:10] == (127, 127) and m.scene_message("x", 0, False, 120, 2.25)[8:10] == (31, 127)   # no beat -> 0x3FFF; beat 2.25 -> phase 4095
 assert m.scene_message("x", 0, False, 120, 7.0)[8:10] == (0, 0) and m.scene_message("x", 0, False, 120, 0.99999)[8:10] != (127, 127)
 assert msg[10:14] == (9, 48, 4, 4) and m.scene_message("x", 0, False, 120, None, 128.5, (7, 8))[10:14] == (10, 5, 7, 8)   # 120.0 4/4 default; 128.5 7/8
+assert m.scene_message("x", 0, 2)[5] == 2 and m.scene_message("x", 0, True)[5] == 1 and m.scene_message("x", 0, 0)[5] == 0   # playing byte: 0 / 1 / 2 = empty scene
 print("PASS")

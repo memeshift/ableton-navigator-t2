@@ -55,7 +55,8 @@ class NavigatorT2(ControlSurface):
         scenes = list(song.scenes)
         index = scenes.index(song.view.selected_scene)
         # the LOM has no scene-level "playing"; count the scene as playing if any track plays its slot
-        playing = any(t.playing_slot_index == index for t in song.tracks)
+        # 2 = empty scene (is_empty is not observable, so it is polled here)
+        playing = 2 if scenes[index].is_empty else int(any(t.playing_slot_index == index for t in song.tracks))
         return song, scenes, index, playing
 
     def _on_scroll(self, value):
