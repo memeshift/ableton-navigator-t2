@@ -9,7 +9,11 @@ Encoder knob(PIN_A, PIN_B);
 U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);   // SSD1306 module? use U8G2_SSD1306_128X64_NONAME_F_HW_I2C
 
 char name[NAME_LEN + 1];
-bool haveState = false, playing = false, needDraw = false;
+bool haveState = false, needDraw = false, stopped = false;
+uint8_t playState = 0;   // 0 not playing, 1 playing, 2 empty scene
+const char EMPTY_MSG[] = "<no clips>";
+const uint32_t STOP_SETTLE_MS = 1000, STOP_MSG_MS = 1000, STOP_SCENE_MS = 1000, LIVE_TIMEOUT_MS = 5000;
+uint32_t lastRx = 0, cycleStart = 0;
 const uint32_t BLINK_LATENCY_MS = 0;   // raise if the blink leads the audible beat (audio output latency)
 uint16_t sceneNum = 0, tempoX10 = 1200;
 uint32_t blinkAnchor = 0;
@@ -29,18 +33,25 @@ void onSysEx(const uint8_t *d, uint16_t n, bool last) {
   if (!last) return;
   if (rxLen == 14 + NAME_LEN + 1 && rx[0] == 0xF0 && rx[1] == 0x7D && rx[2] == 0x02) {
     uint16_t num = rx[3] << 7 | rx[4];
-    playing = rx[5];
+    playState = rx[5];
     tempoX10 = rx[6] << 7 | rx[7];
     uint16_t phase = rx[8] << 7 | rx[9];
     sceneTempoX10 = rx[10] << 7 | rx[11];
     sigNum = rx[12];
     sigDen = rx[13];
-    if (phase != 0x3FFF) blinkAnchor = millis() - (uint32_t)((uint64_t)phase * beatMs() / 0x3FFF);
+    bool nowStopped = phase == 0x3FFF;
+    if (nowStopped && (!stopped || !haveState)) cycleStart = millis() - STOP_SCENE_MS;
+    stopped = nowStopped;
+    lastRx = millis();
+    if (!stopped) blinkAnchor = millis() - (uint32_t)((uint64_t)phase * beatMs() / 0x3FFF);
     char incoming[NAME_LEN + 1];
     memcpy(incoming, rx + 14, NAME_LEN);
     incoming[NAME_LEN] = 0;
     for (int i = NAME_LEN - 1; i >= 0 && incoming[i] == ' '; i--) incoming[i] = 0;
-    if (num != sceneNum || strcmp(incoming, name)) scrollStart = millis();
+    if (num != sceneNum || strcmp(incoming, name)) {
+      scrollStart = millis();
+      cycleStart = millis() - (STOP_SCENE_MS - STOP_SETTLE_MS);
+    }
     sceneNum = num;
     strcpy(name, incoming);
     haveState = true;
@@ -58,6 +69,16 @@ bool blinkOn() {
   return (millis() - blinkAnchor - BLINK_LATENCY_MS) % period < period / 2;
 }
 
+bool showMessage() {
+  if (!stopped || !haveState) return false;
+  return (millis() - cycleStart) % (STOP_MSG_MS + STOP_SCENE_MS) >= STOP_SCENE_MS;
+}
+
+bool emptyMsg() {
+  if (playState != 2 || stopped || !haveState) return false;
+  return (millis() - cycleStart) % (STOP_MSG_MS + STOP_SCENE_MS) >= STOP_SCENE_MS;
+}
+
 int scrollOffset() {
   uint32_t t = millis() - scrollStart;
   return t < SCROLL_DELAY_MS ? 0 : (uint64_t)(t - SCROLL_DELAY_MS) * SCROLL_PX_PER_S / 1000 % (nameW + SCROLL_GAP);
@@ -72,9 +93,13 @@ void draw() {
   if (!haveState) {
     oled.setFont(u8g2_font_6x12_tr);
     oled.drawStr(20, 36, "waiting for Live");
+  } else if (showMessage()) {
+    oled.setFont(u8g2_font_helvB12_tr);
+    drawCentered(28, "Live stopped.");
+    drawCentered(50, "Push play.");
   } else {
     oled.setFont(u8g2_font_6x12_tr);
-    bool show = playing || blinkOn();
+    bool show = playState || stopped || blinkOn();
     if (show) {
       char hdr[16];
       snprintf(hdr, sizeof(hdr), "Scene %u", sceneNum);
@@ -85,15 +110,19 @@ void draw() {
     }
     oled.drawHLine(0, 17, 128);
     oled.drawHLine(0, 46, 128);
-    oled.setFont(u8g2_font_fub20_tr);
-    nameW = oled.getStrWidth(name);
+    bool msg = emptyMsg();
+    const char *mid = msg ? EMPTY_MSG : name;
+    oled.setFont(msg ? u8g2_font_fub14_tr : u8g2_font_fub20_tr);
+    nameW = oled.getStrWidth(mid);
     if (show) {
-      if (nameW <= NAME_FIT) {
-        drawCentered(40, name);
+      if (msg) {
+        drawCentered(38, mid);
+      } else if (nameW <= NAME_FIT) {
+        drawCentered(40, mid);
       } else {
         int x = 2 - scrollOffset();
-        oled.drawStr(x, 40, name);
-        oled.drawStr(x + nameW + SCROLL_GAP, 40, name);
+        oled.drawStr(x, 40, mid);
+        oled.drawStr(x + nameW + SCROLL_GAP, 40, mid);
       }
     }
   }
@@ -111,8 +140,19 @@ void loop() {
   for (int i = 0; i < 64; i++) usbMIDI.read();   // one call consumes one 3-byte event; a SysEx is 12
 
   static bool lastBlink = false;
-  if (haveState && !playing && blinkOn() != lastBlink) {
+  if (haveState && playState == 0 && !stopped && blinkOn() != lastBlink) {
     lastBlink = !lastBlink;
+    needDraw = true;
+  }
+
+  static bool lastMsg = false;
+  if ((showMessage() || emptyMsg()) != lastMsg) {
+    lastMsg = !lastMsg;
+    needDraw = true;
+  }
+
+  if (haveState && millis() - lastRx > LIVE_TIMEOUT_MS) {
+    haveState = false;
     needDraw = true;
   }
 
