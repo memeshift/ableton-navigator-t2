@@ -88,8 +88,8 @@ void draw() {
     oled.drawStr(20, 36, "waiting for Live");
   } else if (showMessage()) {
     oled.setFont(u8g2_font_helvB12_tr);
-    drawCentered(28, "Live stopped");
-    drawCentered(50, "push to play");
+    drawCentered(28, "Live stopped.");
+    drawCentered(50, "Push play.");
   } else {
     oled.setFont(u8g2_font_6x12_tr);
     bool show = playing || stopped || blinkOn();
