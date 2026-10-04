@@ -22,8 +22,10 @@ uint8_t sigNum = 4, sigDen = 4;
 const int NAME_FIT = 124, SCROLL_GAP = 40, SCROLL_PX_PER_S = 40;
 const uint32_t SCROLL_DELAY_MS = 1000;
 uint32_t scrollStart = 0;
+uint8_t progState = 0;   // 0 none, 1 looping clip, 2 one-shot, 3 one-shot finished
+uint32_t progStart = 0, progTotalMs = 0, finishedStart = 0;
 int nameW = 0;
-uint8_t rx[35];
+uint8_t rx[40];
 uint16_t rxLen = 0;
 
 void onSysEx(const uint8_t *d, uint16_t n, bool last) {
@@ -31,7 +33,7 @@ void onSysEx(const uint8_t *d, uint16_t n, bool last) {
   memcpy(rx + rxLen, d, n);
   rxLen += n;
   if (!last) return;
-  if (rxLen == 14 + NAME_LEN + 1 && rx[0] == 0xF0 && rx[1] == 0x7D && rx[2] == 0x02) {
+  if (rxLen == 14 + NAME_LEN + 5 + 1 && rx[0] == 0xF0 && rx[1] == 0x7D && rx[2] == 0x02) {
     uint16_t num = rx[3] << 7 | rx[4];
     playState = rx[5];
     tempoX10 = rx[6] << 7 | rx[7];
@@ -52,6 +54,12 @@ void onSysEx(const uint8_t *d, uint16_t n, bool last) {
       scrollStart = millis();
       cycleStart = millis() - (STOP_SCENE_MS - STOP_SETTLE_MS);
     }
+    uint8_t newProg = rx[14 + NAME_LEN];
+    uint32_t leftMs = (rx[15 + NAME_LEN] << 7 | rx[16 + NAME_LEN]) * 100UL;
+    progTotalMs = (rx[17 + NAME_LEN] << 7 | rx[18 + NAME_LEN]) * 100UL;
+    if (newProg == 3 && progState != 3) finishedStart = millis();
+    progState = newProg;
+    progStart = millis() - (progTotalMs - leftMs);
     sceneNum = num;
     strcpy(name, incoming);
     haveState = true;
@@ -84,6 +92,20 @@ int scrollOffset() {
   return t < SCROLL_DELAY_MS ? 0 : (uint64_t)(t - SCROLL_DELAY_MS) * SCROLL_PX_PER_S / 1000 % (nameW + SCROLL_GAP);
 }
 
+int progFill() {
+  if (stopped) return 0;
+  if (progState == 3) return 128;
+  if (!progState || !progTotalMs) return 0;
+  uint32_t t = millis() - progStart;
+  if (progState == 1) t %= progTotalMs;
+  else if (t > progTotalMs) t = progTotalMs;
+  return (uint64_t)t * 128 / progTotalMs;
+}
+
+bool finishedOn() {
+  return (millis() - finishedStart) % 2000 < 1000;
+}
+
 void drawCentered(int y, const char *s) {
   oled.drawStr((128 - oled.getStrWidth(s)) / 2, y, s);
 }
@@ -111,6 +133,10 @@ void draw() {
     oled.drawHLine(0, 17, 128);
     oled.drawHLine(0, 46, 128);
     bool msg = emptyMsg();
+    int fill = progFill();
+    if (progState == 3 && !stopped && !finishedOn()) fill = 0;
+    if (fill) oled.drawBox(0, 18, fill, 28);
+    oled.setDrawColor(2);
     const char *mid = msg ? EMPTY_MSG : name;
     oled.setFont(msg ? u8g2_font_fub14_tr : u8g2_font_fub20_tr);
     nameW = oled.getStrWidth(mid);
@@ -126,12 +152,14 @@ void draw() {
       }
     }
   }
+  oled.setDrawColor(1);
   oled.sendBuffer();
 }
 
 void setup() {
   pinMode(PIN_SW, INPUT_PULLUP);
   oled.begin();
+  oled.setFontMode(1);
   usbMIDI.setHandleSystemExclusive(onSysEx);
   draw();
 }
@@ -159,6 +187,13 @@ void loop() {
   static int lastOffset = -1;
   if (haveState && nameW > NAME_FIT && scrollOffset() != lastOffset) {
     lastOffset = scrollOffset();
+    needDraw = true;
+  }
+
+  static int lastFill = -1;
+  int fill = haveState && !showMessage() ? progFill() + (progState == 3 && !stopped && finishedOn()) : 0;
+  if (fill != lastFill) {
+    lastFill = fill;
     needDraw = true;
   }
 
